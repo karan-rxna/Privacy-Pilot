@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "PrivacyPilot",
+  "version": "0.1.0",
+  "description": "Shows you what a site is about to do — the exact API call, the exact script, the exact moment.",
+  "minimum_chrome_version": "110",
+  "permissions": [
+    "storage",
+    "tabs"
+  ],
+  "background": {
+    "service_worker": "src/background/service-worker.js",
+    "type": "module"
+  }
+}

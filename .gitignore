@@ -1,0 +1,14 @@
+# Environment
+.env
+
+# Python
+__pycache__/
+*.pyc
+
+# Databases (SQLite cache and local state)
+*.db
+*.sqlite3
+
+# OS / editor noise
+.DS_Store
+Thumbs.db
