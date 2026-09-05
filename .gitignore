@@ -1,14 +1,26 @@
-# Environment
-.env
-
-# Python
-__pycache__/
-*.pyc
-
-# Databases (SQLite cache and local state)
-*.db
-*.sqlite3
-
-# OS / editor noise
+# OS
 .DS_Store
 Thumbs.db
+desktop.ini
+
+# Editors
+.vscode/
+.idea/
+*.swp
+
+# Node (if a build step is added later)
+node_modules/
+dist/
+build/
+*.log
+npm-debug.log*
+
+# Packaged extension
+*.zip
+*.crx
+*.pem
+
+# Env / secrets
+.env
+.env.*
+>>>>>>> 5998091ad88c96f07c664ad1278b0eddad9ad513
