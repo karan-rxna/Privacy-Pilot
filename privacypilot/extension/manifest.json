@@ -1,53 +1,75 @@
 {
   "manifest_version": 3,
-  "name": "PrivacyPilot",
-  "version": "1.0.0",
-  "description": "Privacy and permission layer: logs permission requests, scores site privacy, blocks trackers, and flags phishing.",
-  "minimum_chrome_version": "116",
-
+  "name": "PrivacyPilot AI",
+  "version": "0.3.0",
+  "description": "An AI privacy advisor that watches what sites actually ask for, and explains whether they need it.",
+  "minimum_chrome_version": "111",
   "permissions": [
     "storage",
     "tabs",
-    "declarativeNetRequest",
-    "declarativeNetRequestFeedback"
+    "cookies",
+    "webRequest",
+    "scripting",
+    "contentSettings",
+    "declarativeNetRequest"
   ],
-
-  "host_permissions": ["<all_urls>"],
-
+  "host_permissions": [
+    "<all_urls>"
+  ],
   "background": {
-    "service_worker": "background.js",
+    "service_worker": "src/background/service-worker.js",
     "type": "module"
   },
-
-  "action": {
-    "default_popup": "popup.html",
-    "default_title": "PrivacyPilot"
-  },
-
-  "declarative_net_request": {
-    "rule_resources": [
-      {
-        "id": "trackers",
-        "enabled": true,
-        "path": "rules.json"
-      }
-    ]
-  },
-
   "content_scripts": [
     {
-      "matches": ["<all_urls>"],
-      "js": ["locationSpoofer.js", "pageHook.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/inject/shim.js"
+      ],
       "run_at": "document_start",
       "world": "MAIN",
       "all_frames": true
     },
     {
-      "matches": ["<all_urls>"],
-      "js": ["phishingDetector.js", "content.js"],
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/content/bridge.js"
+      ],
       "run_at": "document_start",
       "world": "ISOLATED",
       "all_frames": true
+    },
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/content/overlay.js"
+      ],
+      "run_at": "document_idle",
+      "world": "ISOLATED",
+      "all_frames": false
     }
-  ]
+  ],
+  "commands": {
+    "toggle-overlay": {
+      "suggested_key": {
+        "default": "Alt+Shift+P",
+        "mac": "Alt+Shift+P"
+      },
+      "description": "Show or hide the privacy overlay"
+    }
+  },
+  "action": {
+    "default_popup": "src/ui/popup.html",
+    "default_title": "PrivacyPilot AI"
+  },
+  "options_page": "src/ui/dashboard.html",
+  "content_security_policy": {
+    "extension_pages": "script-src 'self'; object-src 'self'"
+  }
 }
