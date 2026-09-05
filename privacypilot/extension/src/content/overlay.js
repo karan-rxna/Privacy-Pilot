@@ -25,10 +25,23 @@ if (window.top === window && location.protocol.startsWith("http")) {
       moderate: "#4FE3F5"
     };
 
+    /**
+     * What each mode actually means for this page, in the second person.
+     * "Approximate" is on by default, so a user who notices a map behaving
+     * oddly needs to be able to see why here rather than guess.
+     */
+    const MODE_LABEL = {
+      precise: "Precise — this site gets your real location and hardware.",
+      approximate: "Approximate — this site gets a coarse location and a scrambled fingerprint.",
+      denied: "Denied — location and device requests fail on this site."
+    };
+
     let shadow = null;
     let host = null;
     let alert = null;
     let phishing = null;
+    let consent = null;
+    let fuzz = null;
     let collapsed = false;
     let dismissed = false;
     let fadeTimer = null;
@@ -123,6 +136,17 @@ if (window.top === window && location.protocol.startsWith("http")) {
 
       .done { padding: 14px 13px; font-size: 11.5px; color: #34D399; line-height: 1.5; }
 
+      .mode {
+        display: flex; align-items: baseline; gap: 7px;
+        padding: 9px 13px; font-size: 10.5px; line-height: 1.5; color: #8AA0C2;
+        border-top: 1px solid rgba(96, 205, 255, 0.12);
+      }
+      .mode .tag {
+        font-family: ui-monospace, Menlo, monospace; font-size: 9.5px;
+        letter-spacing: 0.06em; text-transform: uppercase; color: #4FE3F5;
+        white-space: nowrap;
+      }
+
       /* Phishing warning. Deliberately not the same visual language as the
          privacy card: wider, warmer, anchored top-centre, no auto-fade. */
       .wrap.phish { right: 50%; transform: translate(50%, -10px); bottom: auto; top: 18px; width: 420px; }
@@ -176,6 +200,17 @@ if (window.top === window && location.protocol.startsWith("http")) {
       return "#FB7185";
     }
 
+    /** The current fuzzing mode, stated on any card we are already showing. */
+    function modeRow() {
+      const label = MODE_LABEL[fuzz?.mode];
+      if (!label) return "";
+      return `
+        <div class="mode">
+          <span class="tag">Mode</span>
+          <span>${label} Change it in the PrivacyPilot toolbar panel.</span>
+        </div>`;
+    }
+
     function render() {
       if (!shadow) return;
       const root = shadow.lastElementChild;
@@ -185,8 +220,14 @@ if (window.top === window && location.protocol.startsWith("http")) {
         return;
       }
 
-      // A suspected credential-harvesting page outranks everything else. If both
-      // are present, the phishing warning is what the user sees.
+      // A live permission request outranks everything: the page is blocked
+      // waiting on this answer.
+      if (consent) {
+        renderConsent(root);
+        return;
+      }
+
+      // A suspected credential-harvesting page outranks a passive warning.
       if (phishing) {
         renderPhishing(root);
         return;
@@ -241,6 +282,7 @@ if (window.top === window && location.protocol.startsWith("http")) {
               ${permissionFinding ? `<button class="act" data-a="deny">Deny ${permissionFinding.detail}</button>` : ""}
               <button class="act ghost" data-a="dismiss">Not now</button>
             </div>
+            ${modeRow()}
           </div>
         </div>`;
 
@@ -337,6 +379,67 @@ if (window.top === window && location.protocol.startsWith("http")) {
       // Note the absence of scheduleFade() here. Intentional.
     }
 
+    /**
+     * A live permission request.
+     *
+     * No auto-fade and no collapse: the page is blocked on a promise waiting
+     * for this answer, so hiding the dialog would hang the site until the
+     * shim's timeout fires.
+     */
+    function renderConsent(root) {
+      const e = consent;
+      const tone = e.severity === "high" ? "#FB7185" : "#FBBF24";
+
+      root.innerHTML = `
+        <div class="wrap phish" role="alertdialog" aria-label="Permission request">
+          <div class="card phish" style="border-color:rgba(96,205,255,0.35);background:rgba(9,15,28,0.92)">
+            <div class="top">
+              <span class="warnmark" style="color:${tone};background:rgba(251,113,133,0.14)">!</span>
+              <h1 style="color:#E8F1FF">${e.headline}</h1>
+            </div>
+            ${e.script ? `<div class="addr" style="color:#8AA0C2;background:rgba(96,205,255,0.06);border-bottom-color:rgba(96,205,255,0.12)">requested by ${e.script}</div>` : ""}
+            <div class="body">
+              <div class="finding">
+                <div class="fh">
+                  <span class="dot" style="background:${tone}"></span>
+                  <h2>${e.verdict}</h2>
+                </div>
+                <p class="harm">If you allow this, the site can: ${e.consequence}</p>
+              </div>
+            </div>
+            <div class="acts" style="flex-direction:column;border-top-color:rgba(96,205,255,0.12)">
+              <button class="act" data-s="deny">Deny &mdash; the page keeps working</button>
+              <button class="act" data-s="once">Allow once</button>
+              <button class="act ghost" data-s="session">Allow for this visit</button>
+            </div>
+            <p class="caveat" style="border-top-color:rgba(96,205,255,0.12)">
+              PrivacyPilot never grants permanent access. Chrome will ask once
+              more if you allow.
+            </p>
+            ${modeRow()}
+          </div>
+        </div>`;
+
+      requestAnimationFrame(() => root.querySelector(".wrap")?.classList.add("in"));
+
+      root.querySelectorAll("[data-s]").forEach((btn) =>
+        btn.addEventListener("click", () => {
+          try {
+            chrome.runtime.sendMessage({
+              type: "PP_CONSENT_DECISION",
+              requestId: e.requestId,
+              scope: btn.dataset.s,
+              origin: location.origin,
+              detail: e.detail
+            }, () => void chrome.runtime.lastError);
+          } catch {}
+          consent = null;
+          render();
+        })
+      );
+      // No scheduleFade() and no collapse control. Intentional.
+    }
+
     function scheduleFade() {
       clearTimeout(fadeTimer);
       fadeTimer = setTimeout(() => {
@@ -387,25 +490,46 @@ if (window.top === window && location.protocol.startsWith("http")) {
     /* ------------------------------------------------------------------ */
 
     function poll() {
+      // The extension was reloaded while this page stayed open: the content
+      // script survives but its chrome.* connection is dead. Stop cleanly
+      // instead of throwing "Extension context invalidated" every 1.8s.
+      if (!chrome.runtime?.id) {
+        clearInterval(pollTimer);
+        host?.remove();
+        return;
+      }
+      try {
       chrome.runtime.sendMessage({ type: "PP_GET_ALERT" }, (response) => {
         if (chrome.runtime.lastError || !response) return;
 
         const phishChanged = JSON.stringify(response.phishing) !== JSON.stringify(phishing);
         const alertChanged = JSON.stringify(response.alert) !== JSON.stringify(alert);
+        const fuzzChanged = JSON.stringify(response.fuzz) !== JSON.stringify(fuzz);
 
         phishing = response.phishing || null;
         alert = response.alert || null;
+        fuzz = response.fuzz || null;
 
-        if ((phishChanged || alertChanged) && !dismissed) {
+        if ((phishChanged || alertChanged || fuzzChanged) && !dismissed) {
           // A newly detected phishing signal re-opens the panel even if the user
           // had collapsed a privacy card, because it is a different message.
           if (phishChanged && phishing) collapsed = false;
           render();
         }
       });
+      } catch {
+        clearInterval(pollTimer);
+      }
     }
 
     chrome.runtime.onMessage.addListener((msg) => {
+      if (msg?.type === "PP_SHOW_CONSENT") {
+        consent = { requestId: msg.requestId, ...msg.explanation };
+        collapsed = false;
+        dismissed = false;
+        render();
+        return;
+      }
       if (msg?.type !== "PP_TOGGLE_OVERLAY") return;
       if (dismissed) {
         dismissed = false;
@@ -417,7 +541,7 @@ if (window.top === window && location.protocol.startsWith("http")) {
     });
 
     document.addEventListener("keydown", (e) => {
-      if (e.key === "Escape" && alert && !collapsed && !dismissed) {
+      if (e.key === "Escape" && alert && !consent && !collapsed && !dismissed) {
         collapsed = true;
         render();
       }
