@@ -1,4 +1,3 @@
-
 /**
  * PrivacyPilot AI — service worker.
  *
@@ -12,9 +11,21 @@ import { computeScore } from "../lib/score.js";
 import { buildAlert } from "../lib/harms.js";
 import { blockHosts, denyPermission, listBlocked } from "../lib/blocking.js";
 import { analyzePhishing } from "../lib/phishing.js";
+import { explainRequest, SCOPES } from "../lib/consent.js";
+import {
+  seedFor, MODES, LOCATION_GRIDS, DEFAULT_MODE, DEFAULT_LOCATION_LEVEL
+} from "../lib/fuzzing.js";
 
 const BACKEND = "http://127.0.0.1:8000";
 const tabs = new Map(); // tabId -> live observation record
+
+// Pending consent requests: `${tabId}:${requestId}` -> sendResponse.
+// The page is blocked on a promise until one of these is called.
+const askQueue = new Map();
+
+// Grants that expire: `${origin}:${detail}` -> "once" | "session".
+// There is deliberately no permanent scope.
+const sessionGrants = new Map();
 
 function blank(hostname = "") {
   return {
@@ -47,22 +58,56 @@ function serialize(state) {
   return rest;
 }
 
+/* ---------- Fuzzing settings ---------- */
+
+function originOf(url) {
+  try { return new URL(url).origin; } catch { return ""; }
+}
+
+/** The per-site fuzzing setting, with the defaults applied. */
+async function fuzzSettingFor(origin) {
+  const { fuzzModes = {} } = await chrome.storage.local.get("fuzzModes");
+  const setting = fuzzModes[origin] || {};
+  return {
+    mode: MODES[setting.mode] ? setting.mode : DEFAULT_MODE,
+    level: LOCATION_GRIDS[setting.level] !== undefined
+      ? setting.level
+      : DEFAULT_LOCATION_LEVEL
+  };
+}
+
+/**
+ * The per-install salt, created on demand.
+ *
+ * onInstalled alone is not enough: it does not fire for an unpacked extension
+ * already loaded, and a failed write leaves it missing forever. Without a salt
+ * every install distorts a given site identically, which is itself a
+ * fingerprint — the one thing the salt exists to prevent — so it is worth
+ * checking on the path that actually needs it.
+ */
+async function ensureSalt() {
+  const stored = await chrome.storage.local.get("fuzzSalt");
+  if (stored.fuzzSalt) return stored.fuzzSalt;
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  const salt = [...bytes].map((b) => b.toString(16).padStart(2, "0")).join("");
+  await chrome.storage.local.set({ fuzzSalt: salt });
+  return salt;
+}
+
 /* ---------- Tracker observation ---------- */
 
 chrome.webRequest.onBeforeRequest.addListener(
   (details) => {
     if (details.tabId < 0) return;
-    let requestHost, pageHost;
     try {
-      requestHost = new URL(details.url).hostname;
-      const path = new URL(details.url).pathname;
+      const url = new URL(details.url);
+      const requestHost = url.hostname;
       const state = tabs.get(details.tabId);
       if (!state) return;
-      pageHost = state.hostname;
 
-      const hit = identify(requestHost, path);
+      const hit = identify(requestHost, url.pathname);
       if (!hit || hit.category === "cdn") return;
-      if (!isThirdParty(requestHost, pageHost)) return;
+      if (!isThirdParty(requestHost, state.hostname)) return;
       if (state.trackerHosts.has(requestHost)) return;
 
       state.trackerHosts.add(requestHost);
@@ -81,6 +126,10 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
       const host = new URL(tab.url).hostname;
       const existing = tabs.get(tabId);
       if (!existing || existing.hostname !== host) {
+        // Navigating away inside a tab should revoke too, not just closing it.
+        if (existing && existing.hostname) {
+          revokeIfGone(`https://${existing.hostname}`).catch(() => {});
+        }
         tabs.set(tabId, blank(host));
       }
     } catch {}
@@ -94,7 +143,44 @@ chrome.tabs.onUpdated.addListener((tabId, info, tab) => {
   }
 });
 
-chrome.tabs.onRemoved.addListener((tabId) => tabs.delete(tabId));
+/**
+ * Revoke scoped grants once the user has left a site entirely.
+ *
+ * Revokes to 'ask', never 'block'. 'block' means the site can never request
+ * again, which surprises users badly and looks like the extension broke it.
+ */
+async function revokeIfGone(origin) {
+  if (!origin) return;
+  const open = await chrome.tabs.query({});
+  const stillOpen = open.some((t) => {
+    try { return t.url && new URL(t.url).origin === origin; } catch { return false; }
+  });
+  if (stillOpen) return;
+
+  const SETTING_FOR = { microphone: "microphone", camera: "camera", location: "location" };
+
+  for (const key of [...sessionGrants.keys()]) {
+    if (!key.startsWith(origin + ":")) continue;
+    sessionGrants.delete(key);
+    const detail = key.slice(origin.length + 1);
+    const setting = SETTING_FOR[detail.split(" ")[0]];
+    if (setting && chrome.contentSettings[setting]) {
+      chrome.contentSettings[setting]
+        .set({ primaryPattern: `${origin}/*`, setting: "ask" })
+        .catch(() => {});
+    }
+  }
+}
+
+chrome.tabs.onRemoved.addListener(async (tabId) => {
+  const state = tabs.get(tabId);
+  tabs.delete(tabId);
+  // Drop any consent request this tab was waiting on.
+  for (const key of [...askQueue.keys()]) {
+    if (key.startsWith(tabId + ":")) askQueue.delete(key);
+  }
+  if (state && state.hostname) await revokeIfGone(`https://${state.hostname}`);
+});
 
 async function countThirdPartyCookies(tabId, state) {
   try {
@@ -111,8 +197,16 @@ async function countThirdPartyCookies(tabId, state) {
 /* ---------- Badge ---------- */
 
 function updateBadge(tabId, state) {
+  // A suspected credential-harvesting page outranks the score. Showing "72"
+  // next to a phishing warning would read as reassurance.
+  if (state.phishing) {
+    chrome.action.setBadgeText({ tabId, text: "!" }).catch(() => {});
+    chrome.action.setBadgeBackgroundColor({ tabId, color: "#EF4444" }).catch(() => {});
+    return;
+  }
   const { score } = computeScore(serialize(state));
-  const color = score >= 80 ? "#22C55E" : score >= 60 ? "#EAB308" : score >= 40 ? "#F97316" : "#EF4444";
+  const color =
+    score >= 80 ? "#22C55E" : score >= 60 ? "#EAB308" : score >= 40 ? "#F97316" : "#EF4444";
   chrome.action.setBadgeText({ tabId, text: String(score) }).catch(() => {});
   chrome.action.setBadgeBackgroundColor({ tabId, color }).catch(() => {});
 }
@@ -146,7 +240,10 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   if (!msg || !msg.type) return false;
 
   if (msg.type === "PP_EVENTS" && sender.tab) {
-    const state = getState(sender.tab.id, sender.tab.url ? new URL(sender.tab.url).hostname : "");
+    const state = getState(
+      sender.tab.id,
+      sender.tab.url ? new URL(sender.tab.url).hostname : ""
+    );
     state.events.push(...msg.events);
     if (state.events.length > 300) state.events.splice(0, state.events.length - 300);
     updateBadge(sender.tab.id, state);
@@ -159,16 +256,52 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     return false;
   }
 
+  if (msg.type === "PP_DOM_SIGNALS" && sender.tab) {
+    const state = tabs.get(sender.tab.id);
+    if (state) {
+      state.domSignals = msg.signals;
+      state.url = sender.tab.url;
+      state.phishing = analyzePhishing(sender.tab.url || "", msg.signals);
+      updateBadge(sender.tab.id, state);
+    }
+    return false;
+  }
+
   if (msg.type === "PP_GET_TAB") {
     (async () => {
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
       if (!tab) return respond({ error: "no_tab" });
       const state = tabs.get(tab.id) || blank(tab.url ? new URL(tab.url).hostname : "");
+      const plain = serialize(state);
       respond({
         tabId: tab.id,
         url: tab.url,
-        state: serialize(state),
-        result: computeScore(serialize(state))
+        origin: originOf(tab.url),
+        state: plain,
+        result: computeScore(plain),
+        phishing: state.phishing || null,
+        fuzz: await fuzzSettingFor(originOf(tab.url))
+      });
+    })();
+    return true;
+  }
+
+  if (msg.type === "PP_GET_ALERT") {
+    const tabId = sender.tab?.id;
+    const state = tabId != null ? tabs.get(tabId) : null;
+    (async () => {
+      // The overlay needs the fuzzing mode to state it on the card, so this
+      // reads storage and is now async.
+      const fuzz = await fuzzSettingFor(originOf(sender.tab?.url));
+      if (!state || !state.hostname) {
+        respond({ alert: null, phishing: null, fuzz });
+        return;
+      }
+      const plain = serialize(state);
+      respond({
+        alert: buildAlert(plain, computeScore(plain)),
+        phishing: state.phishing || null,
+        fuzz
       });
     })();
     return true;
@@ -185,32 +318,83 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
     return true;
   }
 
-  if (msg.type === "PP_DOM_SIGNALS" && sender.tab) {
-    const state = tabs.get(sender.tab.id);
-    if (state) {
-      state.domSignals = msg.signals;
-      state.url = sender.tab.url;
-      state.phishing = analyzePhishing(sender.tab.url || "", msg.signals);
-      if (state.phishing) {
-        // A credential-harvesting page is a different order of urgency from a
-        // tracker, so it gets its own badge treatment.
-        chrome.action.setBadgeText({ tabId: sender.tab.id, text: "!" }).catch(() => {});
-        chrome.action.setBadgeBackgroundColor({ tabId: sender.tab.id, color: "#EF4444" }).catch(() => {});
-      }
+  if (msg.type === "PP_ASK_PERMISSION" && sender.tab) {
+    const tabId = sender.tab.id;
+    const key = `${tabId}:${msg.id}`;
+    const grantKey = `${msg.origin}:${msg.detail}`;
+
+    // Already granted for this visit — do not ask twice.
+    if (sessionGrants.has(grantKey)) {
+      respond({ verdict: "allow" });
+      return false;
+    }
+
+    askQueue.set(key, respond);
+    const state = tabs.get(tabId);
+    const explanation = explainRequest(
+      state ? state.hostname : "", msg.detail, msg.script
+    );
+
+    chrome.tabs
+      .sendMessage(tabId, { type: "PP_SHOW_CONSENT", requestId: msg.id, explanation })
+      .catch(() => {
+        // No overlay on this page (chrome://, PDFs). Fail open.
+        askQueue.delete(key);
+        respond({ verdict: "allow" });
+      });
+    return true; // keep the channel open until the user decides
+  }
+
+  if (msg.type === "PP_CONSENT_DECISION" && sender.tab) {
+    const key = `${sender.tab.id}:${msg.requestId}`;
+    const respondToPage = askQueue.get(key);
+    if (!respondToPage) return false;
+    askQueue.delete(key);
+
+    const scope = SCOPES[msg.scope] || SCOPES.deny;
+    if (scope.id === "deny") {
+      denyPermission(msg.origin, msg.detail).catch(() => {});
+      respondToPage({ verdict: "deny" });
+    } else {
+      sessionGrants.set(`${msg.origin}:${msg.detail}`, scope.id);
+      respondToPage({ verdict: "allow" });
     }
     return false;
   }
 
-  if (msg.type === "PP_GET_ALERT") {
+  if (msg.type === "PP_GET_FUZZ" && sender.tab) {
     (async () => {
-      const tabId = sender.tab?.id;
-      const state = tabId != null ? tabs.get(tabId) : null;
-      if (!state || !state.hostname) return respond({ alert: null });
-      const plain = serialize(state);
+      const origin = originOf(sender.tab.url);
+      const [salt, setting] = await Promise.all([
+        ensureSalt(),
+        fuzzSettingFor(origin)
+      ]);
       respond({
-        alert: buildAlert(plain, computeScore(plain)),
-        phishing: state.phishing || null
+        seed: seedFor(origin, salt),
+        mode: setting.mode,
+        locationLevel: setting.level
       });
+    })();
+    return true;
+  }
+
+  if (msg.type === "PP_SET_FUZZ_MODE") {
+    (async () => {
+      // Validate against MODES. An unrecognised mode would read as "not
+      // approximate" everywhere in the shim and silently disable fuzzing for
+      // the site — a privacy tool must never fail quietly open.
+      if (!MODES[msg.mode] || !msg.origin) {
+        respond({ ok: false, reason: "Unknown mode." });
+        return;
+      }
+      const level = LOCATION_GRIDS[msg.level] !== undefined
+        ? msg.level
+        : DEFAULT_LOCATION_LEVEL;
+
+      const { fuzzModes = {} } = await chrome.storage.local.get("fuzzModes");
+      fuzzModes[msg.origin] = { mode: msg.mode, level };
+      await chrome.storage.local.set({ fuzzModes });
+      respond({ ok: true, mode: msg.mode, level });
     })();
     return true;
   }
@@ -218,7 +402,19 @@ chrome.runtime.onMessage.addListener((msg, sender, respond) => {
   if (msg.type === "PP_BLOCK") {
     (async () => {
       try {
-        respond(await blockHosts(msg.hosts || []));
+        const result = await blockHosts(msg.hosts || []);
+        // Blocked hosts are no longer present on the page, so drop them from
+        // the count. Otherwise the score never improves and blocking looks
+        // like it did nothing.
+        const tabId = sender.tab?.id;
+        const state = tabId != null ? tabs.get(tabId) : null;
+        if (state) {
+          const blocked = new Set(msg.hosts || []);
+          state.trackers = state.trackers.filter((t) => !blocked.has(t.host));
+          blocked.forEach((h) => state.trackerHosts.delete(h));
+          updateBadge(tabId, state);
+        }
+        respond(result);
       } catch (error) {
         respond({ blocked: 0, error: String(error.message || error) });
       }
@@ -284,8 +480,6 @@ async function analyzePolicy(tabId) {
 
   if (text.length < 400) throw new Error("Could not find enough policy text to analyse.");
 
-  // Probe first, so a dead backend produces a clear message instead of the
-  // browser's generic "Failed to fetch".
   try {
     const health = await fetch(`${BACKEND}/health`, { method: "GET" });
     if (health.ok) {
@@ -308,7 +502,6 @@ async function analyzePolicy(tabId) {
     response = await fetch(`${BACKEND}/analyze-policy`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      // Note: the policy text is sent, the visited URL is not.
       body: JSON.stringify({ text: text.slice(0, 40000) })
     });
   } catch {
@@ -323,7 +516,9 @@ async function analyzePolicy(tabId) {
       throw new Error("No API key configured on the server. Check your .env file.");
     }
     if (response.status === 502) {
-      throw new Error("The model provider rejected the request. Check that your API key is valid and has credit.");
+      throw new Error(
+        "The model provider rejected the request. Check that your API key is valid and has credit."
+      );
     }
     throw new Error(`Analysis service returned ${response.status}. ${detail.slice(0, 120)}`);
   }
@@ -346,6 +541,19 @@ chrome.commands.onCommand.addListener(async (command) => {
   } catch {
     // No content script on this page (chrome:// pages, the web store, PDFs).
   }
+});
+
+/* ---------- Per-install fuzzing salt ---------- */
+
+/**
+ * Generated once and never changed.
+ *
+ * Without a per-install salt, every PrivacyPilot user would distort a given
+ * site identically — which is itself a fingerprint. With it, each install is
+ * consistent to a site but different from every other user.
+ */
+chrome.runtime.onInstalled.addListener(() => {
+  ensureSalt().catch(() => {});
 });
 
 /* ---------- Restore blocking rules on startup ---------- */
