@@ -1,0 +1,45 @@
+:root {
+  --bg: #090513;
+  --surface: rgba(23, 16, 43, .72);
+  --surface-strong: rgba(31, 21, 59, .9);
+  --line: rgba(203, 179, 255, .15);
+  --line-strong: rgba(180, 125, 255, .48);
+  --cyan: #5ef2ff;
+  --blue: #8975ff;
+  --violet: #bd7bff;
+  --pink: #ff72bd;
+  --ink: #f8f5ff;
+  --ink-dim: #b8afd0;
+  --ink-faint: #82799d;
+  --low: #62e5ab;
+  --medium: #ffd36e;
+  --high: #ff759d;
+  --mono: "Cascadia Mono", "Cascadia Code", Consolas, monospace;
+  --sans: "Bahnschrift", "Segoe UI Variable", "Segoe UI", Arial, sans-serif;
+  --display: "Bahnschrift", "Arial Black", "Segoe UI", Arial, sans-serif;
+  --r: 18px;
+  --r-sm: 12px;
+  --shadow: 0 24px 70px rgba(0, 0, 0, .38);
+}
+
+* { box-sizing:border-box; margin:0; padding:0; }
+body {
+  min-height:100vh; color:var(--ink); font-family:var(--sans); font-size:13px; line-height:1.5;
+  background-color:var(--bg);
+  background-image: radial-gradient(1000px 620px at -8% -16%, rgba(132,80,255,.34), transparent 57%), radial-gradient(800px 600px at 108% 5%, rgba(0,220,255,.2), transparent 54%), radial-gradient(650px 500px at 55% 108%, rgba(255,65,166,.15), transparent 65%);
+  -webkit-font-smoothing:antialiased;
+}
+body::before { content:""; position:fixed; inset:0; pointer-events:none; opacity:.2; background-image:linear-gradient(rgba(255,255,255,.035) 1px, transparent 1px),linear-gradient(90deg,rgba(255,255,255,.035) 1px,transparent 1px); background-size:36px 36px; mask-image:linear-gradient(to bottom,black,transparent 75%); }
+.card { background:linear-gradient(135deg,rgba(42,28,78,.78),rgba(17,13,35,.76)); border:1px solid var(--line); border-radius:var(--r); box-shadow:var(--shadow); backdrop-filter:blur(22px) saturate(130%); -webkit-backdrop-filter:blur(22px) saturate(130%); }
+.eyebrow { font-family:var(--mono); font-size:10px; letter-spacing:.15em; text-transform:uppercase; color:var(--ink-faint); }
+.mono { font-family:var(--mono); }
+.pill { display:inline-flex; align-items:center; gap:5px; padding:3px 8px; border-radius:999px; font-family:var(--mono); font-size:9px; letter-spacing:.08em; text-transform:uppercase; border:1px solid currentColor; }
+.pill.low { color:var(--low); background:rgba(98,229,171,.08); }.pill.medium { color:var(--medium); background:rgba(255,211,110,.08); }.pill.high { color:var(--high); background:rgba(255,117,157,.08); }
+button { position:relative; overflow:hidden; font-family:var(--sans); font-size:12px; font-weight:650; letter-spacing:.01em; color:#fff; background:linear-gradient(115deg,#7b62ff,#c16eff); border:1px solid rgba(224,202,255,.5); border-radius:var(--r-sm); padding:9px 13px; cursor:pointer; box-shadow:0 8px 20px rgba(127,78,255,.24); transition:transform 180ms ease,box-shadow 180ms ease,filter 180ms ease; }
+button::after { content:""; position:absolute; inset:0; background:linear-gradient(105deg,transparent 30%,rgba(255,255,255,.3) 48%,transparent 64%); transform:translateX(-115%); transition:transform 450ms ease; } button:hover::after { transform:translateX(115%); } button:hover { transform:translateY(-2px); filter:brightness(1.12); box-shadow:0 12px 27px rgba(127,78,255,.38); } button:active { transform:translateY(0) scale(.98); } button:focus-visible { outline:2px solid var(--cyan); outline-offset:3px; } button[disabled] { opacity:.5; cursor:default; }
+a { color:var(--cyan); } ::-webkit-scrollbar { width:7px; height:7px; } ::-webkit-scrollbar-thumb { background:linear-gradient(var(--violet),var(--cyan)); border-radius:8px; } ::-webkit-scrollbar-track { background:transparent; }
+@keyframes rise { from { opacity:0; transform:translateY(18px) scale(.96); filter:blur(4px); } to { opacity:1; transform:translateY(0) scale(1); filter:blur(0); } }
+@keyframes breathe { 0%,100% { transform:scale(1); opacity:.72; } 50% { transform:scale(1.22); opacity:1; } }
+@keyframes glow { 0%,100% { box-shadow:0 0 0 0 rgba(94,242,255,.35); } 50% { box-shadow:0 0 0 7px rgba(94,242,255,0); } }
+@keyframes drift { from { transform:translate3d(-2%,0,0) rotate(0); } to { transform:translate3d(3%,2%,0) rotate(8deg); } }
+@media (prefers-reduced-motion:reduce) { *,*::before,*::after { animation:none!important; transition:none!important; scroll-behavior:auto!important; } }
