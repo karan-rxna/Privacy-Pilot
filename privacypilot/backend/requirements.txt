@@ -1,0 +1,12 @@
+# Python 3.11+ (tested on 3.11-3.14).
+#
+# pydantic is floored at 2.12 deliberately: it is the first release whose
+# pydantic-core ships prebuilt cp314 wheels. Anything older has no wheel for
+# 3.14, so pip falls back to building the Rust extension from source and the
+# install dies on "linker `link.exe` not found" unless Visual C++ Build Tools
+# are installed. Do not pin this back to 2.10.x.
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+httpx==0.28.1
+pydantic>=2.12,<3
+python-dotenv==1.0.1
